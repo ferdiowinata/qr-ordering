@@ -10,14 +10,26 @@ const appName = import.meta.env.VITE_APP_NAME || "Laravel";
 
 void createInertiaApp({
     title: (title) => (title ? `${title} - ${appName}` : appName),
+    // Menentukan layout berdasarkan jenis halaman Inertia.
     layout: (name) => {
         switch (true) {
+            // Halaman publik tidak menggunakan layout admin.
             case name === "welcome":
                 return null;
+
+            // Seluruh halaman pelanggan tidak menggunakan sidebar admin.
+            case name.startsWith("ordering/"):
+                return null;
+
+            // Halaman autentikasi menggunakan layout khusus.
             case name.startsWith("auth/"):
                 return AuthLayout;
+
+            // Halaman pengaturan menggunakan layout admin dan settings.
             case name.startsWith("settings/"):
                 return [AppLayout, SettingsLayout];
+
+            // Halaman admin lainnya menggunakan layout utama.
             default:
                 return AppLayout;
         }

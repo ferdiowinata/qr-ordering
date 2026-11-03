@@ -55,13 +55,19 @@ class CustomerMenuController extends Controller
             ->values();
 
         return Inertia::render('ordering/menu', [
+        // Mengirim token QR meja kepada halaman pelanggan.
         'token' => $table->qr_token,
 
+        // Mengirim identitas dan versi sesi meja.
         'table' => [
             'name' => $table->name,
             'code' => $table->code,
         ],
 
+        // Versi ini akan digunakan untuk memvalidasi checkout.
+        'sessionVersion' => $table->session_version,
+
+        // Mengirim daftar kategori beserta menu yang tersedia.
         'categories' => $categories,
     ]);
     }

@@ -1,6 +1,7 @@
 import { Link } from "@inertiajs/react";
 import {
     ClipboardList,
+    CreditCard,
     LayoutGrid,
     QrCode,
     Tags,
@@ -21,6 +22,7 @@ import {
 import { dashboard } from "@/routes";
 import type { NavItem } from "@/types";
 
+// Mengatur daftar navigasi utama pada sidebar admin.
 const mainNavItems: NavItem[] = [
     {
         title: "Dashboard",
@@ -36,6 +38,11 @@ const mainNavItems: NavItem[] = [
         title: "Pesanan",
         href: "/admin/orders",
         icon: ClipboardList,
+    },
+    {
+        title: "Sesi Dine-in",
+        href: "/admin/dine-in-sessions",
+        icon: CreditCard,
     },
     {
         title: "Kategori Menu",

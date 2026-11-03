@@ -20,6 +20,13 @@ class StoreCustomerOrderRequest extends FormRequest
                 'uuid',
             ],
 
+            // Memastikan pelanggan menggunakan versi sesi meja yang valid.
+            'session_version' => [
+                'required',
+                'integer',
+                'min:1',
+            ],
+
             'customer_name' => [
                 'nullable',
                 'string',

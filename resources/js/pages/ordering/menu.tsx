@@ -14,6 +14,7 @@ type CheckoutData = {
     customer_name: string;
     notes: string;
     submission_key: string;
+    session_version: number;
     items: {
         menu_item_id: number;
         quantity: number;
@@ -30,6 +31,7 @@ type MenuCategory = {
 
 type Props = {
     token: string;
+    sessionVersion: number;
     table: {
         name: string;
         code: string;
@@ -47,10 +49,40 @@ type MenuItem = {
 };
 
 const CART_TTL_MS = 30 * 60 * 1000;
+// Membuat UUID v4 menggunakan crypto yang mendukung HTTP jaringan lokal.
+function createSubmissionKey(): string {
+    // Menghasilkan 16 byte acak secara kriptografis.
+    const bytes = new Uint8Array(16);
 
-const cartStorageKey = (token: string) => `qr-ordering-cart:${token}`;
+    window.crypto.getRandomValues(bytes);
 
-function readCart(token: string): CartState {
+    // Menentukan versi UUID menjadi versi 4.
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+
+    // Mengatur variant UUID sesuai standar.
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+
+    // Mengubah setiap byte menjadi format hexadecimal.
+    const hex = Array.from(bytes, (byte) =>
+        byte.toString(16).padStart(2, "0"),
+    ).join("");
+
+    // Menyusun UUID dengan format 8-4-4-4-12.
+    return [
+        hex.slice(0, 8),
+        hex.slice(8, 12),
+        hex.slice(12, 16),
+        hex.slice(16, 20),
+        hex.slice(20, 32),
+    ].join("-");
+}
+
+// Membuat kunci penyimpanan keranjang berdasarkan meja dan versi sesi.
+const cartStorageKey = (token: string, sessionVersion: number) =>
+    `qr-ordering-cart:${token}:v${sessionVersion}`;
+
+// Membaca keranjang yang sesuai dengan versi sesi meja.
+function readCart(token: string, sessionVersion: number): CartState {
     const emptyCart = (): CartState => ({
         items: [],
         lastActivityAt: Date.now(),
@@ -60,7 +92,8 @@ function readCart(token: string): CartState {
         return emptyCart();
     }
 
-    const key = cartStorageKey(token);
+    // Menggunakan penyimpanan khusus untuk versi sesi saat ini.
+    const key = cartStorageKey(token, sessionVersion);
 
     try {
         const raw = window.sessionStorage.getItem(key);
@@ -108,11 +141,21 @@ function menuEmoji(name: string): string {
     return "🍽️";
 }
 
-export default function MenuPage({ token, table, categories }: Props) {
-    const [cartState, setCartState] = useState<CartState>(() => readCart(token));
+// Menampilkan menu dan mengelola keranjang berdasarkan sesi meja.
+export default function MenuPage({
+    token,
+    table,
+    categories,
+    sessionVersion,
+}: Props) {
+    // Mengambil keranjang yang sesuai dengan versi sesi saat halaman dibuka.
+    const [cartState, setCartState] = useState<CartState>(() =>
+        readCart(token, sessionVersion),
+    );
 
+    // Menyimpan keranjang berdasarkan versi sesi meja.
     useEffect(() => {
-        const key = cartStorageKey(token);
+        const key = cartStorageKey(token, sessionVersion);
 
         if (cartState.items.length === 0) {
             window.sessionStorage.removeItem(key);
@@ -120,14 +163,17 @@ export default function MenuPage({ token, table, categories }: Props) {
         }
 
         window.sessionStorage.setItem(key, JSON.stringify(cartState));
-    }, [cartState, token]);
+        // Menyimpan perubahan keranjang sesuai versi sesi yang sedang digunakan.
+    }, [cartState, token, sessionVersion]);
 
     const submissionKeyRef = useRef<string | null>(null);
 
+    // Menyiapkan data checkout untuk dikirim ke backend Laravel.
     const checkoutForm = useForm<CheckoutData>({
         customer_name: "",
         notes: "",
         submission_key: "",
+        session_version: sessionVersion,
         items: [],
     });
 
@@ -136,7 +182,7 @@ export default function MenuPage({ token, table, categories }: Props) {
     }, [cartState.items]);
 
     useEffect(() => {
-        const key = cartStorageKey(token);
+        const key = cartStorageKey(token, sessionVersion);
 
         const intervalId = window.setInterval(() => {
             setCartState((current) => {
@@ -157,7 +203,8 @@ export default function MenuPage({ token, table, categories }: Props) {
         }, 60_000);
 
         return () => window.clearInterval(intervalId);
-    }, [token]);
+        // Mengikuti identitas meja dan versi sesi pada penyimpanan keranjang.
+    }, [token, sessionVersion]);
 
     const [isCartOpen, setIsCartOpen] = useState(false);
 
@@ -177,7 +224,10 @@ export default function MenuPage({ token, table, categories }: Props) {
         };
     }, []);
 
-    const totalQuantity = cartState.items.reduce((total, item) => total + item.quantity, 0);
+    const totalQuantity = cartState.items.reduce(
+        (total, item) => total + item.quantity,
+        0,
+    );
 
     const cartTotal = cartState.items.reduce(
         (total, item) => total + Number(item.price) * item.quantity,
@@ -208,7 +258,9 @@ export default function MenuPage({ token, table, categories }: Props) {
     }
 
     function addToCart(item: MenuItem) {
-        const existing = cartState.items.find((cartItem) => cartItem.id === item.id);
+        const existing = cartState.items.find(
+            (cartItem) => cartItem.id === item.id,
+        );
 
         // Jangan menampilkan notifikasi sukses jika batas tercapai.
         if (existing && existing.quantity >= 20) {
@@ -260,14 +312,22 @@ export default function MenuPage({ token, table, categories }: Props) {
             return;
         }
 
+        // Membuat kunci unik untuk setiap pengiriman pesanan.
         if (!submissionKeyRef.current) {
-            submissionKeyRef.current = window.crypto.randomUUID();
+            submissionKeyRef.current = createSubmissionKey();
         }
 
-        // Atur data yang akan dikirim ke Laravel.
+        // Menambahkan identitas versi sesi sebelum data dikirim ke Laravel.
         checkoutForm.transform((data) => ({
             ...data,
+
+            // Mempertahankan kunci unik untuk mencegah pesanan duplikat.
             submission_key: submissionKeyRef.current!,
+
+            // Mengirim versi sesi yang digunakan saat halaman dibuka.
+            session_version: sessionVersion,
+
+            // Mengirim daftar menu dan jumlah yang dipesan.
             items: cartState.items.map((item) => ({
                 menu_item_id: item.id,
                 quantity: item.quantity,
@@ -279,17 +339,25 @@ export default function MenuPage({ token, table, categories }: Props) {
         checkoutForm.post(`/m/${token}/orders`, {
             preserveScroll: true,
 
+            // Menghapus keranjang dari penyimpanan setelah pesanan berhasil dibuat.
             onSuccess: () => {
-                window.sessionStorage.removeItem(cartStorageKey(token));
+                window.sessionStorage.removeItem(
+                    cartStorageKey(token, sessionVersion),
+                );
             },
         });
     }
 
     function getItemQuantity(itemId: number): number {
-        return cartState.items.find((cartItem) => cartItem.id === itemId)?.quantity ?? 0;
+        return (
+            cartState.items.find((cartItem) => cartItem.id === itemId)
+                ?.quantity ?? 0
+        );
     }
 
-    const visibleCategories = categories.filter((category) => category.items.length > 0);
+    const visibleCategories = categories.filter(
+        (category) => category.items.length > 0,
+    );
 
     return (
         <>
@@ -303,7 +371,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                         </div>
 
                         <div>
-                            <p className="text-lg font-black tracking-tight">Rasa Kita</p>
+                            <p className="text-lg font-black tracking-tight">
+                                Rasa Kita
+                            </p>
                             <p className="text-[10px] font-bold uppercase tracking-[0.2em] text-[#8B9186]">
                                 Good food, good mood
                             </p>
@@ -316,7 +386,10 @@ export default function MenuPage({ token, table, categories }: Props) {
                     </div>
                 </header>
 
-                <div id="top" className="mx-auto max-w-6xl px-4 pb-12 sm:px-6 lg:px-8">
+                <div
+                    id="top"
+                    className="mx-auto max-w-6xl px-4 pb-12 sm:px-6 lg:px-8"
+                >
                     <section className="relative overflow-hidden rounded-[2rem] bg-[#19483D] px-6 py-9 text-white sm:px-10 sm:py-12">
                         <div className="relative z-10 max-w-xl">
                             <p className="mb-4 inline-flex rounded-full border border-white/20 bg-white/10 px-3 py-1.5 text-xs font-semibold tracking-wide text-[#F9D8B9]">
@@ -330,8 +403,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                             </h1>
 
                             <p className="mt-4 max-w-md text-sm leading-6 text-white/75 sm:text-base">
-                                Temukan makanan dan minuman favoritmu. Semua menu tersedia langsung
-                                dari meja tempat kamu duduk.
+                                Temukan makanan dan minuman favoritmu. Semua
+                                menu tersedia langsung dari meja tempat kamu
+                                duduk.
                             </p>
 
                             <a
@@ -382,7 +456,8 @@ export default function MenuPage({ token, table, categories }: Props) {
 
                             <span className="text-sm font-medium text-[#777E74]">
                                 {visibleCategories.reduce(
-                                    (total, category) => total + category.items.length,
+                                    (total, category) =>
+                                        total + category.items.length,
                                     0,
                                 )}{" "}
                                 pilihan menu
@@ -409,7 +484,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                         {visibleCategories.length === 0 ? (
                             <div className="mt-8 rounded-3xl border border-dashed border-[#D9D8CC] bg-white p-10 text-center">
                                 <div className="text-4xl">🍽️</div>
-                                <h3 className="mt-4 text-lg font-bold">Menu belum tersedia</h3>
+                                <h3 className="mt-4 text-lg font-bold">
+                                    Menu belum tersedia
+                                </h3>
                                 <p className="mt-2 text-sm text-[#777E74]">
                                     Silakan kunjungi kembali nanti.
                                 </p>
@@ -423,7 +500,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                                         className="scroll-mt-6"
                                     >
                                         <div className="mb-4 flex items-center justify-between">
-                                            <h3 className="text-xl font-black">{category.name}</h3>
+                                            <h3 className="text-xl font-black">
+                                                {category.name}
+                                            </h3>
                                             <span className="text-xs font-semibold text-[#8B9186]">
                                                 {category.items.length} menu
                                             </span>
@@ -434,7 +513,8 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                 <article
                                                     key={item.id}
                                                     className={`group overflow-hidden rounded-3xl border bg-white transition duration-300 hover:-translate-y-1 hover:shadow-lg hover:shadow-[#24352F]/5 ${
-                                                        recentlyAddedId === item.id
+                                                        recentlyAddedId ===
+                                                        item.id
                                                             ? "cart-item-added border-[#19483D] ring-2 ring-[#19483D]/20"
                                                             : "border-[#EAE8DF]"
                                                     }`}
@@ -452,7 +532,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                                 <div className="absolute -bottom-12 -left-5 h-36 w-36 rounded-full bg-[#E8B58A]/25" />
 
                                                                 <span className="relative text-7xl drop-shadow-sm transition duration-300 group-hover:scale-110">
-                                                                    {menuEmoji(item.name)}
+                                                                    {menuEmoji(
+                                                                        item.name,
+                                                                    )}
                                                                 </span>
                                                             </>
                                                         )}
@@ -474,13 +556,21 @@ export default function MenuPage({ token, table, categories }: Props) {
 
                                                         <div className="mt-5 flex items-center justify-between gap-3 border-t border-[#F0EFE8] pt-4">
                                                             <span className="text-base font-black text-[#D66A3A]">
-                                                                {formatRupiah(item.price)}
+                                                                {formatRupiah(
+                                                                    item.price,
+                                                                )}
                                                             </span>
 
-                                                            {getItemQuantity(item.id) === 0 ? (
+                                                            {getItemQuantity(
+                                                                item.id,
+                                                            ) === 0 ? (
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => addToCart(item)}
+                                                                    onClick={() =>
+                                                                        addToCart(
+                                                                            item,
+                                                                        )
+                                                                    }
                                                                     className="rounded-full bg-[#19483D] px-4 py-2.5 text-sm font-bold text-white transition hover:bg-[#286653] active:scale-95"
                                                                 >
                                                                     + Tambah
@@ -505,7 +595,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                                         aria-live="polite"
                                                                         className="min-w-6 text-center text-sm font-black text-[#19483D]"
                                                                     >
-                                                                        {getItemQuantity(item.id)}
+                                                                        {getItemQuantity(
+                                                                            item.id,
+                                                                        )}
                                                                     </span>
 
                                                                     <button
@@ -514,7 +606,8 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                                         disabled={
                                                                             getItemQuantity(
                                                                                 item.id,
-                                                                            ) >= 20
+                                                                            ) >=
+                                                                            20
                                                                         }
                                                                         onClick={() =>
                                                                             changeQuantity(
@@ -541,7 +634,9 @@ export default function MenuPage({ token, table, categories }: Props) {
 
                     <footer className="mt-14 border-t border-[#E5E4DB] py-6 text-center text-xs text-[#8B9186]">
                         <p className="font-bold">Rasa Kita</p>
-                        <p className="mt-1">Nikmati hidanganmu, nikmati momennya.</p>
+                        <p className="mt-1">
+                            Nikmati hidanganmu, nikmati momennya.
+                        </p>
                     </footer>
                 </div>
 
@@ -603,7 +698,10 @@ export default function MenuPage({ token, table, categories }: Props) {
                                     <p className="text-xs font-bold uppercase tracking-widest text-[#D66A3A]">
                                         Pesanan kamu
                                     </p>
-                                    <h2 id="cart-title" className="mt-1 text-2xl font-black">
+                                    <h2
+                                        id="cart-title"
+                                        className="mt-1 text-2xl font-black"
+                                    >
                                         Keranjang
                                     </h2>
                                     <p className="mt-1 text-sm text-[#777E74]">
@@ -624,9 +722,12 @@ export default function MenuPage({ token, table, categories }: Props) {
                             {cartState.items.length === 0 ? (
                                 <div className="py-10 text-center">
                                     <div className="text-4xl">🛒</div>
-                                    <p className="mt-3 font-bold">Keranjang masih kosong</p>
+                                    <p className="mt-3 font-bold">
+                                        Keranjang masih kosong
+                                    </p>
                                     <p className="mt-1 text-sm text-[#777E74]">
-                                        Tambahkan menu favoritmu terlebih dahulu.
+                                        Tambahkan menu favoritmu terlebih
+                                        dahulu.
                                     </p>
                                 </div>
                             ) : (
@@ -638,15 +739,21 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                 className="flex items-center justify-between gap-3 py-4"
                                             >
                                                 <div className="min-w-0 flex-1">
-                                                    <p className="font-bold">{item.name}</p>
+                                                    <p className="font-bold">
+                                                        {item.name}
+                                                    </p>
 
                                                     <p className="mt-1 text-sm text-[#777E74]">
-                                                        {formatRupiah(item.price)} / item
+                                                        {formatRupiah(
+                                                            item.price,
+                                                        )}{" "}
+                                                        / item
                                                     </p>
 
                                                     <p className="mt-1 text-sm font-bold text-[#D66A3A]">
                                                         {formatRupiah(
-                                                            Number(item.price) * item.quantity,
+                                                            Number(item.price) *
+                                                                item.quantity,
                                                         )}
                                                     </p>
                                                 </div>
@@ -655,7 +762,12 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                     <button
                                                         type="button"
                                                         aria-label={`Kurangi ${item.name}`}
-                                                        onClick={() => changeQuantity(item.id, -1)}
+                                                        onClick={() =>
+                                                            changeQuantity(
+                                                                item.id,
+                                                                -1,
+                                                            )
+                                                        }
                                                         className="flex h-9 w-9 items-center justify-center rounded-full border border-[#DCDDD3] text-lg font-bold hover:bg-[#F3F2EC]"
                                                     >
                                                         −
@@ -668,8 +780,15 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                     <button
                                                         type="button"
                                                         aria-label={`Tambah ${item.name}`}
-                                                        disabled={item.quantity >= 20}
-                                                        onClick={() => changeQuantity(item.id, 1)}
+                                                        disabled={
+                                                            item.quantity >= 20
+                                                        }
+                                                        onClick={() =>
+                                                            changeQuantity(
+                                                                item.id,
+                                                                1,
+                                                            )
+                                                        }
                                                         className="flex h-9 w-9 items-center justify-center rounded-full bg-[#19483D] text-lg font-bold text-white hover:bg-[#286653] disabled:cursor-not-allowed disabled:opacity-40"
                                                     >
                                                         +
@@ -690,8 +809,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                                         </div>
 
                                         <p className="mt-2 text-xs leading-5 text-[#8B9186]">
-                                            Subtotal sementara. Harga akhir akan divalidasi kembali
-                                            oleh server saat pesanan dikirim.
+                                            Subtotal sementara. Harga akhir akan
+                                            divalidasi kembali oleh server saat
+                                            pesanan dikirim.
                                         </p>
 
                                         <div className="mt-5 space-y-4">
@@ -707,7 +827,10 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                     id="customer_name"
                                                     type="text"
                                                     maxLength={100}
-                                                    value={checkoutForm.data.customer_name}
+                                                    value={
+                                                        checkoutForm.data
+                                                            .customer_name
+                                                    }
                                                     onChange={(event) =>
                                                         checkoutForm.setData(
                                                             "customer_name",
@@ -718,9 +841,13 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                     className="w-full rounded-xl border border-[#DCDDD3] px-4 py-3 text-sm outline-none focus:border-[#19483D]"
                                                 />
 
-                                                {checkoutForm.errors.customer_name && (
+                                                {checkoutForm.errors
+                                                    .customer_name && (
                                                     <p className="mt-1 text-sm text-red-600">
-                                                        {checkoutForm.errors.customer_name}
+                                                        {
+                                                            checkoutForm.errors
+                                                                .customer_name
+                                                        }
                                                     </p>
                                                 )}
                                             </div>
@@ -737,7 +864,9 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                     id="order_notes"
                                                     maxLength={1000}
                                                     rows={2}
-                                                    value={checkoutForm.data.notes}
+                                                    value={
+                                                        checkoutForm.data.notes
+                                                    }
                                                     onChange={(event) =>
                                                         checkoutForm.setData(
                                                             "notes",
@@ -750,7 +879,10 @@ export default function MenuPage({ token, table, categories }: Props) {
 
                                                 {checkoutForm.errors.notes && (
                                                     <p className="mt-1 text-sm text-red-600">
-                                                        {checkoutForm.errors.notes}
+                                                        {
+                                                            checkoutForm.errors
+                                                                .notes
+                                                        }
                                                     </p>
                                                 )}
                                             </div>
@@ -760,13 +892,39 @@ export default function MenuPage({ token, table, categories }: Props) {
                                                     {checkoutForm.errors.items}
                                                 </p>
                                             )}
+
+                                            {/* Menampilkan pemberitahuan ketika versi sesi sudah kedaluwarsa. */}
+                                            {checkoutForm.errors
+                                                .session_version && (
+                                                <div className="rounded-xl border border-amber-200 bg-amber-50 p-4">
+                                                    <p className="text-sm font-semibold text-amber-800">
+                                                        {
+                                                            checkoutForm.errors
+                                                                .session_version
+                                                        }
+                                                    </p>
+
+                                                    {/* Memuat ulang halaman agar mendapatkan versi sesi terbaru. */}
+                                                    <button
+                                                        type="button"
+                                                        onClick={() =>
+                                                            window.location.reload()
+                                                        }
+                                                        className="mt-3 rounded-full bg-[#19483D] px-4 py-2 text-sm font-bold text-white hover:bg-[#286653]"
+                                                    >
+                                                        Muat ulang menu
+                                                    </button>
+                                                </div>
+                                            )}
                                         </div>
 
                                         <div className="mt-5 grid grid-cols-2 gap-3">
                                             <button
                                                 type="button"
                                                 onClick={clearCart}
-                                                disabled={checkoutForm.processing}
+                                                disabled={
+                                                    checkoutForm.processing
+                                                }
                                                 className="rounded-full border border-[#DCDDD3] px-4 py-3 text-sm font-bold hover:bg-[#F3F2EC] disabled:opacity-50"
                                             >
                                                 Kosongkan
@@ -774,8 +932,12 @@ export default function MenuPage({ token, table, categories }: Props) {
 
                                             <button
                                                 type="button"
-                                                onClick={() => setIsCartOpen(false)}
-                                                disabled={checkoutForm.processing}
+                                                onClick={() =>
+                                                    setIsCartOpen(false)
+                                                }
+                                                disabled={
+                                                    checkoutForm.processing
+                                                }
                                                 className="rounded-full border border-[#DCDDD3] px-4 py-3 text-sm font-bold hover:bg-[#F3F2EC] disabled:opacity-50"
                                             >
                                                 Lanjut pilih menu
